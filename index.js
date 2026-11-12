@@ -5,6 +5,17 @@ const { Server } = require("socket.io");
 const { ObjectId } = require("mongodb");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const { graphqlHTTP } = require("express-graphql");
+
+const {
+    GraphQLSchema,
+    GraphQLObjectType,
+    GraphQLString,
+    GraphQLID,
+    GraphQLList,
+    GraphQLNonNull
+} = require("graphql");
+
 const connectDB = require("./db");
 require("dotenv").config();
 
@@ -24,7 +35,8 @@ app.use(express.static("public"));
 let students;
 let users;
 
-// Socket.io connection
+// ---------------- SOCKET.IO ----------------
+
 io.on("connection", (socket) => {
     console.log("A user connected:", socket.id);
 
@@ -33,7 +45,8 @@ io.on("connection", (socket) => {
     });
 });
 
-// JWT Authentication Middleware
+// ---------------- JWT AUTHENTICATION ----------------
+
 function authenticateToken(req, res, next) {
     const authHeader = req.headers.authorization;
     const token = authHeader && authHeader.split(" ")[1];
@@ -56,12 +69,14 @@ function authenticateToken(req, res, next) {
     });
 }
 
-// Home Route
+// ---------------- HOME ROUTE ----------------
+
 app.get("/", (req, res) => {
     res.send("Student Management API is running!");
 });
 
-// Signup API
+// ---------------- SIGNUP API ----------------
+
 app.post("/auth/signup", async (req, res) => {
     try {
         const { name, email, password } = req.body;
@@ -137,7 +152,8 @@ app.post("/auth/signup", async (req, res) => {
     }
 });
 
-// Login API
+// ---------------- LOGIN API ----------------
+
 app.post("/auth/login", async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -208,7 +224,8 @@ app.post("/auth/login", async (req, res) => {
     }
 });
 
-// Protected Profile API
+// ---------------- PROFILE API ----------------
+
 app.get("/auth/profile", authenticateToken, async (req, res) => {
     try {
         const user = await users.findOne(
@@ -240,7 +257,8 @@ app.get("/auth/profile", authenticateToken, async (req, res) => {
     }
 });
 
-// GET All Students - Protected
+// ---------------- REST API: GET ALL STUDENTS ----------------
+
 app.get("/students", authenticateToken, async (req, res) => {
     try {
         const data = await students.find().toArray();
@@ -255,7 +273,8 @@ app.get("/students", authenticateToken, async (req, res) => {
     }
 });
 
-// GET Student by ID - Protected
+// ---------------- REST API: GET STUDENT BY ID ----------------
+
 app.get("/students/:id", authenticateToken, async (req, res) => {
     try {
         if (!ObjectId.isValid(req.params.id)) {
@@ -285,7 +304,8 @@ app.get("/students/:id", authenticateToken, async (req, res) => {
     }
 });
 
-// POST New Student - Protected
+// ---------------- REST API: ADD STUDENT ----------------
+
 app.post("/students", authenticateToken, async (req, res) => {
     try {
         const { name, course } = req.body;
@@ -314,7 +334,6 @@ app.post("/students", authenticateToken, async (req, res) => {
 
         const result = await students.insertOne(newStudent);
 
-        // Notify connected clients
         io.emit("students:changed");
 
         res.status(201).json({
@@ -334,7 +353,8 @@ app.post("/students", authenticateToken, async (req, res) => {
     }
 });
 
-// PUT Update Student - Protected
+// ---------------- REST API: UPDATE STUDENT ----------------
+
 app.put("/students/:id", authenticateToken, async (req, res) => {
     try {
         if (!ObjectId.isValid(req.params.id)) {
@@ -384,7 +404,6 @@ app.put("/students/:id", authenticateToken, async (req, res) => {
             });
         }
 
-        // Notify connected clients
         io.emit("students:changed");
 
         res.json({
@@ -400,7 +419,8 @@ app.put("/students/:id", authenticateToken, async (req, res) => {
     }
 });
 
-// DELETE Student - Protected
+// ---------------- REST API: DELETE STUDENT ----------------
+
 app.delete("/students/:id", authenticateToken, async (req, res) => {
     try {
         if (!ObjectId.isValid(req.params.id)) {
@@ -419,7 +439,6 @@ app.delete("/students/:id", authenticateToken, async (req, res) => {
             });
         }
 
-        // Notify connected clients
         io.emit("students:changed");
 
         res.json({
@@ -435,7 +454,222 @@ app.delete("/students/:id", authenticateToken, async (req, res) => {
     }
 });
 
-// Start Server
+// ================= GRAPHQL API =================
+
+// Student Type
+const StudentType = new GraphQLObjectType({
+    name: "Student",
+
+    fields: {
+        id: {
+            type: GraphQLID,
+            resolve: (student) => student._id.toString()
+        },
+
+        name: {
+            type: GraphQLString
+        },
+
+        course: {
+            type: GraphQLString
+        }
+    }
+});
+
+// GraphQL Queries
+const RootQuery = new GraphQLObjectType({
+    name: "RootQueryType",
+
+    fields: {
+        students: {
+            type: new GraphQLList(StudentType),
+
+            resolve: async () => {
+                return await students.find().toArray();
+            }
+        },
+
+        student: {
+            type: StudentType,
+
+            args: {
+                id: {
+                    type: new GraphQLNonNull(GraphQLID)
+                }
+            },
+
+            resolve: async (_, args) => {
+                if (!ObjectId.isValid(args.id)) {
+                    throw new Error("Invalid student ID");
+                }
+
+                const result = await students.findOne({
+                    _id: new ObjectId(args.id)
+                });
+
+                if (!result) {
+                    throw new Error("Student not found");
+                }
+
+                return result;
+            }
+        }
+    }
+});
+
+// GraphQL Mutations
+const RootMutation = new GraphQLObjectType({
+    name: "RootMutationType",
+
+    fields: {
+        addStudent: {
+            type: StudentType,
+
+            args: {
+                name: {
+                    type: new GraphQLNonNull(GraphQLString)
+                },
+
+                course: {
+                    type: new GraphQLNonNull(GraphQLString)
+                }
+            },
+
+            resolve: async (_, args) => {
+                const name = args.name.trim();
+                const course = args.course.trim();
+
+                if (!name || !course) {
+                    throw new Error("Name and course cannot be empty");
+                }
+
+                const newStudent = {
+                    name,
+                    course
+                };
+
+                const result = await students.insertOne(newStudent);
+
+                io.emit("students:changed");
+
+                return {
+                    _id: result.insertedId,
+                    ...newStudent
+                };
+            }
+        },
+
+        updateStudent: {
+            type: StudentType,
+
+            args: {
+                id: {
+                    type: new GraphQLNonNull(GraphQLID)
+                },
+
+                name: {
+                    type: GraphQLString
+                },
+
+                course: {
+                    type: GraphQLString
+                }
+            },
+
+            resolve: async (_, args) => {
+                if (!ObjectId.isValid(args.id)) {
+                    throw new Error("Invalid student ID");
+                }
+
+                const updates = {};
+
+                if (args.name !== undefined) {
+                    if (typeof args.name !== "string" || !args.name.trim()) {
+                        throw new Error("Invalid student name");
+                    }
+
+                    updates.name = args.name.trim();
+                }
+
+                if (args.course !== undefined) {
+                    if (typeof args.course !== "string" || !args.course.trim()) {
+                        throw new Error("Invalid course");
+                    }
+
+                    updates.course = args.course.trim();
+                }
+
+                if (Object.keys(updates).length === 0) {
+                    throw new Error("Provide name or course to update");
+                }
+
+                const result = await students.updateOne(
+                    { _id: new ObjectId(args.id) },
+                    { $set: updates }
+                );
+
+                if (result.matchedCount === 0) {
+                    throw new Error("Student not found");
+                }
+
+                io.emit("students:changed");
+
+                return await students.findOne({
+                    _id: new ObjectId(args.id)
+                });
+            }
+        },
+
+        deleteStudent: {
+            type: GraphQLString,
+
+            args: {
+                id: {
+                    type: new GraphQLNonNull(GraphQLID)
+                }
+            },
+
+            resolve: async (_, args) => {
+                if (!ObjectId.isValid(args.id)) {
+                    throw new Error("Invalid student ID");
+                }
+
+                const result = await students.deleteOne({
+                    _id: new ObjectId(args.id)
+                });
+
+                if (result.deletedCount === 0) {
+                    throw new Error("Student not found");
+                }
+
+                io.emit("students:changed");
+
+                return "Student deleted successfully!";
+            }
+        }
+    }
+});
+
+// Create GraphQL Schema
+const schema = new GraphQLSchema({
+    query: RootQuery,
+    mutation: RootMutation
+});
+
+// Protected GraphQL Endpoint
+app.use(
+    "/graphql",
+    authenticateToken,
+    graphqlHTTP({
+        schema,
+        graphiql: true
+    })
+);
+
+// ================= END GRAPHQL API =================
+
+// ---------------- START SERVER ----------------
+
 async function startServer() {
     try {
         if (!process.env.JWT_SECRET) {
@@ -455,6 +689,7 @@ async function startServer() {
         server.listen(3000, () => {
             console.log("Server running on port 3000");
             console.log("Socket.io is ready!");
+            console.log("GraphQL endpoint: http://localhost:3000/graphql");
         });
 
     } catch (error) {
