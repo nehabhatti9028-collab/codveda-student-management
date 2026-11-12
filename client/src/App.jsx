@@ -1,5 +1,6 @@
 
 import { useEffect, useState } from 'react'
+import { io } from 'socket.io-client'
 import './App.css'
 
 function App() {
@@ -138,6 +139,7 @@ function App() {
     }
   }
 
+  // Check logged-in user
   useEffect(() => {
     let ignore = false
 
@@ -188,9 +190,58 @@ function App() {
     }
   }, [token])
 
+  // Load students after login
   useEffect(() => {
     if (token && user) {
       loadStudents()
+    }
+  }, [token, user])
+
+  // Socket.io real-time connection
+  useEffect(() => {
+    if (!token || !user) return
+
+    const socket = io('http://localhost:3000')
+
+    socket.on('connect', () => {
+      console.log('Connected to Socket.io:', socket.id)
+    })
+
+    socket.on('students:changed', async () => {
+      try {
+        const response = await fetch('/students', {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        })
+
+        if (response.status === 401 || response.status === 403) {
+          localStorage.removeItem('token')
+          setToken('')
+          setUser(null)
+          setStudents([])
+          return
+        }
+
+        if (!response.ok) {
+          throw new Error('Unable to refresh students')
+        }
+
+        const data = await response.json()
+        setStudents(data)
+
+        console.log('Student records updated in real time')
+      } catch (error) {
+        console.error('Real-time update error:', error)
+      }
+    })
+
+    socket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error.message)
+    })
+
+    return () => {
+      socket.disconnect()
     }
   }, [token, user])
 

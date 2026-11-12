@@ -1,5 +1,7 @@
 
 const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
 const { ObjectId } = require("mongodb");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -7,12 +9,29 @@ const connectDB = require("./db");
 require("dotenv").config();
 
 const app = express();
+const server = http.createServer(app);
+
+const io = new Server(server, {
+    cors: {
+        origin: "http://localhost:5173",
+        methods: ["GET", "POST"]
+    }
+});
 
 app.use(express.json());
 app.use(express.static("public"));
 
 let students;
 let users;
+
+// Socket.io connection
+io.on("connection", (socket) => {
+    console.log("A user connected:", socket.id);
+
+    socket.on("disconnect", () => {
+        console.log("A user disconnected:", socket.id);
+    });
+});
 
 // JWT Authentication Middleware
 function authenticateToken(req, res, next) {
@@ -53,9 +72,11 @@ app.post("/auth/signup", async (req, res) => {
             });
         }
 
-        if (typeof name !== "string" ||
+        if (
+            typeof name !== "string" ||
             typeof email !== "string" ||
-            typeof password !== "string") {
+            typeof password !== "string"
+        ) {
             return res.status(400).json({
                 message: "Invalid input"
             });
@@ -121,9 +142,12 @@ app.post("/auth/login", async (req, res) => {
     try {
         const { email, password } = req.body;
 
-        if (!email || !password ||
+        if (
+            !email ||
+            !password ||
             typeof email !== "string" ||
-            typeof password !== "string") {
+            typeof password !== "string"
+        ) {
             return res.status(400).json({
                 message: "Valid email and password are required"
             });
@@ -266,9 +290,12 @@ app.post("/students", authenticateToken, async (req, res) => {
     try {
         const { name, course } = req.body;
 
-        if (!name || !course ||
+        if (
+            !name ||
+            !course ||
             typeof name !== "string" ||
-            typeof course !== "string") {
+            typeof course !== "string"
+        ) {
             return res.status(400).json({
                 message: "Valid name and course are required"
             });
@@ -286,6 +313,9 @@ app.post("/students", authenticateToken, async (req, res) => {
         }
 
         const result = await students.insertOne(newStudent);
+
+        // Notify connected clients
+        io.emit("students:changed");
 
         res.status(201).json({
             message: "Student added successfully!",
@@ -354,6 +384,9 @@ app.put("/students/:id", authenticateToken, async (req, res) => {
             });
         }
 
+        // Notify connected clients
+        io.emit("students:changed");
+
         res.json({
             message: "Student updated successfully!"
         });
@@ -386,6 +419,9 @@ app.delete("/students/:id", authenticateToken, async (req, res) => {
             });
         }
 
+        // Notify connected clients
+        io.emit("students:changed");
+
         res.json({
             message: "Student deleted successfully!"
         });
@@ -416,8 +452,9 @@ async function startServer() {
             { unique: true }
         );
 
-        app.listen(3000, () => {
+        server.listen(3000, () => {
             console.log("Server running on port 3000");
+            console.log("Socket.io is ready!");
         });
 
     } catch (error) {
