@@ -1,113 +1,425 @@
 
 const express = require("express");
 const { ObjectId } = require("mongodb");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 const connectDB = require("./db");
+require("dotenv").config();
 
 const app = express();
+
 app.use(express.json());
 app.use(express.static("public"));
-let students;
 
-// Home route
+let students;
+let users;
+
+// JWT Authentication Middleware
+function authenticateToken(req, res, next) {
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.split(" ")[1];
+
+    if (!token) {
+        return res.status(401).json({
+            message: "Access denied. Token required."
+        });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (error, user) => {
+        if (error) {
+            return res.status(403).json({
+                message: "Invalid or expired token"
+            });
+        }
+
+        req.user = user;
+        next();
+    });
+}
+
+// Home Route
 app.get("/", (req, res) => {
     res.send("Student Management API is running!");
 });
 
-// GET all students
-app.get("/students", async (req, res) => {
-    const data = await students.find().toArray();
-    res.json(data);
-});
+// Signup API
+app.post("/auth/signup", async (req, res) => {
+    try {
+        const { name, email, password } = req.body;
 
-// GET student by ID
-app.get("/students/:id", async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
-        return res.status(400).json({ message: "Invalid student ID" });
-    }
+        if (!name || !email || !password) {
+            return res.status(400).json({
+                message: "All fields are required"
+            });
+        }
 
-    const student = await students.findOne({
-        _id: new ObjectId(req.params.id)
-    });
+        if (typeof name !== "string" ||
+            typeof email !== "string" ||
+            typeof password !== "string") {
+            return res.status(400).json({
+                message: "Invalid input"
+            });
+        }
 
-    if (!student) {
-        return res.status(404).json({ message: "Student not found" });
-    }
+        if (password.length < 8) {
+            return res.status(400).json({
+                message: "Password must be at least 8 characters"
+            });
+        }
 
-    res.json(student);
-});
+        const cleanName = name.trim();
+        const cleanEmail = email.trim().toLowerCase();
 
-// POST new student
-app.post("/students", async (req, res) => {
-    const { name, course } = req.body;
+        if (!cleanName || !cleanEmail) {
+            return res.status(400).json({
+                message: "Name and email cannot be empty"
+            });
+        }
 
-    if (!name || !course) {
-        return res.status(400).json({
-            message: "Name and course are required"
+        const existingUser = await users.findOne({
+            email: cleanEmail
+        });
+
+        if (existingUser) {
+            return res.status(409).json({
+                message: "Email already registered"
+            });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        const newUser = {
+            name: cleanName,
+            email: cleanEmail,
+            password: hashedPassword
+        };
+
+        const result = await users.insertOne(newUser);
+
+        res.status(201).json({
+            message: "Account created successfully!",
+            userId: result.insertedId
+        });
+
+    } catch (error) {
+        console.error("Signup error:", error);
+
+        if (error.code === 11000) {
+            return res.status(409).json({
+                message: "Email already registered"
+            });
+        }
+
+        res.status(500).json({
+            message: "Unable to create account"
         });
     }
-
-    const newStudent = { name, course };
-
-    const result = await students.insertOne(newStudent);
-
-    res.status(201).json({
-        message: "Student added successfully!",
-        student: { _id: result.insertedId, ...newStudent }
-    });
 });
 
-// PUT update student
-app.put("/students/:id", async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
-        return res.status(400).json({ message: "Invalid student ID" });
-    }
+// Login API
+app.post("/auth/login", async (req, res) => {
+    try {
+        const { email, password } = req.body;
 
-    const { name, course } = req.body;
+        if (!email || !password ||
+            typeof email !== "string" ||
+            typeof password !== "string") {
+            return res.status(400).json({
+                message: "Valid email and password are required"
+            });
+        }
 
-    if (!name && !course) {
-        return res.status(400).json({
-            message: "Provide name or course to update"
+        const cleanEmail = email.trim().toLowerCase();
+
+        const user = await users.findOne({
+            email: cleanEmail
+        });
+
+        if (!user) {
+            return res.status(401).json({
+                message: "Invalid email or password"
+            });
+        }
+
+        const passwordMatch = await bcrypt.compare(
+            password,
+            user.password
+        );
+
+        if (!passwordMatch) {
+            return res.status(401).json({
+                message: "Invalid email or password"
+            });
+        }
+
+        if (!process.env.JWT_SECRET) {
+            throw new Error("JWT_SECRET is not configured");
+        }
+
+        const token = jwt.sign(
+            {
+                userId: user._id.toString(),
+                email: user.email
+            },
+            process.env.JWT_SECRET,
+            { expiresIn: "1h" }
+        );
+
+        res.json({
+            message: "Login successful!",
+            token,
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email
+            }
+        });
+
+    } catch (error) {
+        console.error("Login error:", error);
+
+        res.status(500).json({
+            message: "Unable to login"
         });
     }
-
-    const result = await students.updateOne(
-        { _id: new ObjectId(req.params.id) },
-        { $set: { ...(name && { name }), ...(course && { course }) } }
-    );
-
-    if (result.matchedCount === 0) {
-        return res.status(404).json({ message: "Student not found" });
-    }
-
-    res.json({ message: "Student updated successfully!" });
 });
 
-// DELETE student
-app.delete("/students/:id", async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
-        return res.status(400).json({ message: "Invalid student ID" });
+// Protected Profile API
+app.get("/auth/profile", authenticateToken, async (req, res) => {
+    try {
+        const user = await users.findOne(
+            {
+                _id: new ObjectId(req.user.userId)
+            },
+            {
+                projection: { password: 0 }
+            }
+        );
+
+        if (!user) {
+            return res.status(404).json({
+                message: "User not found"
+            });
+        }
+
+        res.json({
+            message: "Authenticated successfully!",
+            user
+        });
+
+    } catch (error) {
+        console.error("Profile error:", error);
+
+        res.status(500).json({
+            message: "Unable to fetch profile"
+        });
     }
-
-    const result = await students.deleteOne({
-        _id: new ObjectId(req.params.id)
-    });
-
-    if (result.deletedCount === 0) {
-        return res.status(404).json({ message: "Student not found" });
-    }
-
-    res.json({ message: "Student deleted successfully!" });
 });
 
-// Start server after database connection
+// GET All Students - Protected
+app.get("/students", authenticateToken, async (req, res) => {
+    try {
+        const data = await students.find().toArray();
+        res.json(data);
+
+    } catch (error) {
+        console.error("Fetch students error:", error);
+
+        res.status(500).json({
+            message: "Unable to fetch students"
+        });
+    }
+});
+
+// GET Student by ID - Protected
+app.get("/students/:id", authenticateToken, async (req, res) => {
+    try {
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({
+                message: "Invalid student ID"
+            });
+        }
+
+        const student = await students.findOne({
+            _id: new ObjectId(req.params.id)
+        });
+
+        if (!student) {
+            return res.status(404).json({
+                message: "Student not found"
+            });
+        }
+
+        res.json(student);
+
+    } catch (error) {
+        console.error("Fetch student error:", error);
+
+        res.status(500).json({
+            message: "Unable to fetch student"
+        });
+    }
+});
+
+// POST New Student - Protected
+app.post("/students", authenticateToken, async (req, res) => {
+    try {
+        const { name, course } = req.body;
+
+        if (!name || !course ||
+            typeof name !== "string" ||
+            typeof course !== "string") {
+            return res.status(400).json({
+                message: "Valid name and course are required"
+            });
+        }
+
+        const newStudent = {
+            name: name.trim(),
+            course: course.trim()
+        };
+
+        if (!newStudent.name || !newStudent.course) {
+            return res.status(400).json({
+                message: "Name and course cannot be empty"
+            });
+        }
+
+        const result = await students.insertOne(newStudent);
+
+        res.status(201).json({
+            message: "Student added successfully!",
+            student: {
+                _id: result.insertedId,
+                ...newStudent
+            }
+        });
+
+    } catch (error) {
+        console.error("Add student error:", error);
+
+        res.status(500).json({
+            message: "Unable to add student"
+        });
+    }
+});
+
+// PUT Update Student - Protected
+app.put("/students/:id", authenticateToken, async (req, res) => {
+    try {
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({
+                message: "Invalid student ID"
+            });
+        }
+
+        const { name, course } = req.body;
+
+        if (!name && !course) {
+            return res.status(400).json({
+                message: "Provide name or course to update"
+            });
+        }
+
+        const updates = {};
+
+        if (name !== undefined) {
+            if (typeof name !== "string" || !name.trim()) {
+                return res.status(400).json({
+                    message: "Invalid student name"
+                });
+            }
+
+            updates.name = name.trim();
+        }
+
+        if (course !== undefined) {
+            if (typeof course !== "string" || !course.trim()) {
+                return res.status(400).json({
+                    message: "Invalid course"
+                });
+            }
+
+            updates.course = course.trim();
+        }
+
+        const result = await students.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: updates }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({
+                message: "Student not found"
+            });
+        }
+
+        res.json({
+            message: "Student updated successfully!"
+        });
+
+    } catch (error) {
+        console.error("Update student error:", error);
+
+        res.status(500).json({
+            message: "Unable to update student"
+        });
+    }
+});
+
+// DELETE Student - Protected
+app.delete("/students/:id", authenticateToken, async (req, res) => {
+    try {
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({
+                message: "Invalid student ID"
+            });
+        }
+
+        const result = await students.deleteOne({
+            _id: new ObjectId(req.params.id)
+        });
+
+        if (result.deletedCount === 0) {
+            return res.status(404).json({
+                message: "Student not found"
+            });
+        }
+
+        res.json({
+            message: "Student deleted successfully!"
+        });
+
+    } catch (error) {
+        console.error("Delete student error:", error);
+
+        res.status(500).json({
+            message: "Unable to delete student"
+        });
+    }
+});
+
+// Start Server
 async function startServer() {
     try {
+        if (!process.env.JWT_SECRET) {
+            throw new Error("JWT_SECRET is missing from .env");
+        }
+
         const db = await connectDB();
+
         students = db.collection("students");
+        users = db.collection("users");
+
+        await users.createIndex(
+            { email: 1 },
+            { unique: true }
+        );
 
         app.listen(3000, () => {
             console.log("Server running on port 3000");
         });
+
     } catch (error) {
         console.error("Server startup failed:", error);
     }

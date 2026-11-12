@@ -1,0 +1,36 @@
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  font-family: Arial, sans-serif;
+  background: #f4f7fb;
+  color: #243047;
+}
+
+h1,
+h2,
+p,
+td,
+th {
+  color: inherit;
+}
+
+input {
+  background: white;
+  color: #243047;
+}
+
+input::placeholder {
+  color: #94a3b8;
+}
