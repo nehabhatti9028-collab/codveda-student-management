@@ -1,44 +1,43 @@
 
 const express = require("express");
+const { ObjectId } = require("mongodb");
+const connectDB = require("./db");
 
 const app = express();
-
-// Middleware to read JSON data
 app.use(express.json());
-
-// Temporary student database
-let students = [
-    { id: 1, name: "Neha", course: "BCA" },
-    { id: 2, name: "Rahul", course: "BCA" }
-];
+app.use(express.static("public"));
+let students;
 
 // Home route
 app.get("/", (req, res) => {
     res.send("Student Management API is running!");
 });
 
-// GET: Show all students
-app.get("/students", (req, res) => {
-    res.json(students);
+// GET all students
+app.get("/students", async (req, res) => {
+    const data = await students.find().toArray();
+    res.json(data);
 });
 
-// GET: Find student by ID
-app.get("/students/:id", (req, res) => {
-    const student = students.find(
-        s => s.id === Number(req.params.id)
-    );
+// GET student by ID
+app.get("/students/:id", async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({ message: "Invalid student ID" });
+    }
+
+    const student = await students.findOne({
+        _id: new ObjectId(req.params.id)
+    });
 
     if (!student) {
-        return res.status(404).json({
-            message: "Student not found"
-        });
+        return res.status(404).json({ message: "Student not found" });
     }
 
     res.json(student);
 });
 
-// POST: Add new student
-app.post("/students", (req, res) => {
+// POST new student
+app.post("/students", async (req, res) => {
     const { name, course } = req.body;
 
     if (!name || !course) {
@@ -47,107 +46,71 @@ app.post("/students", (req, res) => {
         });
     }
 
-    const newStudent = {
-        id: students.length
-            ? Math.max(...students.map(s => s.id)) + 1
-            : 1,
-        name: name,
-        course: course
-    };
+    const newStudent = { name, course };
 
-    students.push(newStudent);
+    const result = await students.insertOne(newStudent);
 
     res.status(201).json({
         message: "Student added successfully!",
-        student: newStudent
+        student: { _id: result.insertedId, ...newStudent }
     });
 });
 
-// PUT: Update student
-app.put("/students/:id", (req, res) => {
-    const student = students.find(
-        s => s.id === Number(req.params.id)
+// PUT update student
+app.put("/students/:id", async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({ message: "Invalid student ID" });
+    }
+
+    const { name, course } = req.body;
+
+    if (!name && !course) {
+        return res.status(400).json({
+            message: "Provide name or course to update"
+        });
+    }
+
+    const result = await students.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { ...(name && { name }), ...(course && { course }) } }
     );
 
-    if (!student) {
-        return res.status(404).json({
-            message: "Student not found"
-        });
+    if (result.matchedCount === 0) {
+        return res.status(404).json({ message: "Student not found" });
     }
 
-    student.name = req.body.name || student.name;
-    student.course = req.body.course || student.course;
-
-    res.json({
-        message: "Student updated successfully!",
-        student: student
-    });
+    res.json({ message: "Student updated successfully!" });
 });
 
-// DELETE: Delete student
-app.delete("/students/:id", (req, res) => {
-    const id = Number(req.params.id);
-
-    const index = students.findIndex(s => s.id === id);
-
-    if (index === -1) {
-        return res.status(404).json({
-            message: "Student not found"
-        });
+// DELETE student
+app.delete("/students/:id", async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({ message: "Invalid student ID" });
     }
 
-    const deletedStudent = students.splice(index, 1);
-
-    res.json({
-        message: "Student deleted successfully!",
-        student: deletedStudent[0]
+    const result = await students.deleteOne({
+        _id: new ObjectId(req.params.id)
     });
-});
 
-// PUT: Update student details
-app.put("/students/:id", (req, res) => {
-
-    const studentId = Number(req.params.id);
-
-    const student = students.find(s => s.id === studentId);
-
-    if (!student) {
-        return res.status(404).json({
-            message: "Student not found!"
-        });
+    if (result.deletedCount === 0) {
+        return res.status(404).json({ message: "Student not found" });
     }
 
-    student.name = req.body.name || student.name;
-    student.course = req.body.course || student.course;
-
-    res.json({
-        message: "Student updated successfully!",
-        student: student
-    });
+    res.json({ message: "Student deleted successfully!" });
 });
 
-app.delete("/students/:id", (req, res) => {
+// Start server after database connection
+async function startServer() {
+    try {
+        const db = await connectDB();
+        students = db.collection("students");
 
-    const id = Number(req.params.id);
-
-    const index = students.findIndex(s => s.id === id);
-
-    if (index === -1) {
-        return res.status(404).json({
-            message: "Student not found!"
+        app.listen(3000, () => {
+            console.log("Server running on port 3000");
         });
+    } catch (error) {
+        console.error("Server startup failed:", error);
     }
+}
 
-    const deletedStudent = students.splice(index, 1);
-
-    res.json({
-        message: "Student deleted successfully!",
-        student: deletedStudent[0]
-    });
-});
-
-
-// Start server (keep this at the end)
-app.listen(3000, () => {
-    console.log("Server running on port 3000");
-});
+startServer();
