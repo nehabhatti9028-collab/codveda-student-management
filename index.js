@@ -1,6 +1,7 @@
 
 const express = require("express");
 const http = require("http");
+const cors = require("cors");
 const { Server } = require("socket.io");
 const { ObjectId } = require("mongodb");
 const bcrypt = require("bcrypt");
@@ -19,15 +20,17 @@ const {
 const connectDB = require("./db");
 require("dotenv").config();
 
+// ================= APP SETUP =================
+
 const app = express();
 const server = http.createServer(app);
 
-const io = new Server(server, {
-    cors: {
-        origin: "http://localhost:5173",
-        methods: ["GET", "POST"]
-    }
-});
+// EXPRESS CORS
+app.use(cors({
+    origin: "http://localhost:5173",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+}));
 
 app.use(express.json());
 app.use(express.static("public"));
@@ -35,65 +38,129 @@ app.use(express.static("public"));
 let students;
 let users;
 
-// ---------------- SOCKET.IO ----------------
+// ================= SOCKET.IO =================
+
+const io = new Server(server, {
+    cors: {
+        origin: "http://localhost:5173",
+        methods: ["GET", "POST", "PUT", "DELETE"]
+    }
+});
 
 io.on("connection", (socket) => {
-    console.log("A user connected:", socket.id);
+    console.log("User connected:", socket.id);
 
     socket.on("disconnect", () => {
-        console.log("A user disconnected:", socket.id);
+        console.log("User disconnected:", socket.id);
     });
 });
 
-// ---------------- JWT AUTHENTICATION ----------------
+// ================= JWT AUTHENTICATION =================
 
-function authenticateToken(req, res, next) {
-    const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.split(" ")[1];
+async function authenticateToken(req, res, next) {
+    try {
+        const authHeader = req.headers.authorization;
 
-    if (!token) {
-        return res.status(401).json({
-            message: "Access denied. Token required."
-        });
-    }
-
-    jwt.verify(token, process.env.JWT_SECRET, (error, user) => {
-        if (error) {
-            return res.status(403).json({
-                message: "Invalid or expired token"
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({
+                message: "Access token required"
             });
         }
 
-        req.user = user;
+        const token = authHeader.split(" ")[1];
+
+        const decoded = jwt.verify(
+            token,
+            process.env.JWT_SECRET
+        );
+
+        if (!ObjectId.isValid(decoded.userId)) {
+            return res.status(403).json({
+                message: "Invalid user ID in token"
+            });
+        }
+
+        const user = await users.findOne({
+            _id: new ObjectId(decoded.userId)
+        });
+
+        if (!user) {
+            return res.status(401).json({
+                message: "User not found"
+            });
+        }
+
+        req.user = {
+            userId: user._id.toString(),
+            name: user.name,
+            email: user.email,
+            role: String(user.role || "user").trim().toLowerCase()
+        };
+
+        console.log(
+            "Authenticated:",
+            req.user.email,
+            "Role:",
+            req.user.role
+        );
+
         next();
-    });
+
+    } catch (error) {
+        console.error("Authentication error:", error.message);
+
+        return res.status(403).json({
+            message: "Invalid or expired token"
+        });
+    }
 }
 
-// ---------------- HOME ROUTE ----------------
+// ================= ROLE AUTHORIZATION =================
+
+function authorizeRole(...allowedRoles) {
+    return (req, res, next) => {
+        console.log(
+            "Checking role:",
+            req.user?.role,
+            "Allowed:",
+            allowedRoles
+        );
+
+        if (
+            !req.user ||
+            !allowedRoles.includes(req.user.role)
+        ) {
+            return res.status(403).json({
+                message: "You are not authorized to perform this action"
+            });
+        }
+
+        next();
+    };
+}
+
+// ================= HOME ROUTE =================
 
 app.get("/", (req, res) => {
     res.send("Student Management API is running!");
 });
 
-// ---------------- SIGNUP API ----------------
+// ================= SIGNUP =================
 
 app.post("/auth/signup", async (req, res) => {
     try {
         const { name, email, password } = req.body;
 
-        if (!name || !email || !password) {
-            return res.status(400).json({
-                message: "All fields are required"
-            });
-        }
-
         if (
             typeof name !== "string" ||
             typeof email !== "string" ||
-            typeof password !== "string"
+            typeof password !== "string" ||
+            !name.trim() ||
+            !email.trim() ||
+            !password
         ) {
             return res.status(400).json({
-                message: "Invalid input"
+                message: "All fields are required"
             });
         }
 
@@ -105,12 +172,6 @@ app.post("/auth/signup", async (req, res) => {
 
         const cleanName = name.trim();
         const cleanEmail = email.trim().toLowerCase();
-
-        if (!cleanName || !cleanEmail) {
-            return res.status(400).json({
-                message: "Name and email cannot be empty"
-            });
-        }
 
         const existingUser = await users.findOne({
             email: cleanEmail
@@ -127,7 +188,8 @@ app.post("/auth/signup", async (req, res) => {
         const newUser = {
             name: cleanName,
             email: cleanEmail,
-            password: hashedPassword
+            password: hashedPassword,
+            role: "user"
         };
 
         const result = await users.insertOne(newUser);
@@ -152,17 +214,17 @@ app.post("/auth/signup", async (req, res) => {
     }
 });
 
-// ---------------- LOGIN API ----------------
+// ================= LOGIN =================
 
 app.post("/auth/login", async (req, res) => {
     try {
         const { email, password } = req.body;
 
         if (
-            !email ||
-            !password ||
             typeof email !== "string" ||
-            typeof password !== "string"
+            typeof password !== "string" ||
+            !email.trim() ||
+            !password
         ) {
             return res.status(400).json({
                 message: "Valid email and password are required"
@@ -192,10 +254,6 @@ app.post("/auth/login", async (req, res) => {
             });
         }
 
-        if (!process.env.JWT_SECRET) {
-            throw new Error("JWT_SECRET is not configured");
-        }
-
         const token = jwt.sign(
             {
                 userId: user._id.toString(),
@@ -205,13 +263,20 @@ app.post("/auth/login", async (req, res) => {
             { expiresIn: "1h" }
         );
 
+        const role = String(user.role || "user")
+            .trim()
+            .toLowerCase();
+
+        console.log("Login successful:", user.email, role);
+
         res.json({
             message: "Login successful!",
             token,
             user: {
                 id: user._id,
                 name: user.name,
-                email: user.email
+                email: user.email,
+                role
             }
         });
 
@@ -224,17 +289,13 @@ app.post("/auth/login", async (req, res) => {
     }
 });
 
-// ---------------- PROFILE API ----------------
+// ================= PROFILE =================
 
 app.get("/auth/profile", authenticateToken, async (req, res) => {
     try {
         const user = await users.findOne(
-            {
-                _id: new ObjectId(req.user.userId)
-            },
-            {
-                projection: { password: 0 }
-            }
+            { _id: new ObjectId(req.user.userId) },
+            { projection: { password: 0 } }
         );
 
         if (!user) {
@@ -257,7 +318,7 @@ app.get("/auth/profile", authenticateToken, async (req, res) => {
     }
 });
 
-// ---------------- REST API: GET ALL STUDENTS ----------------
+// ================= GET ALL STUDENTS =================
 
 app.get("/students", authenticateToken, async (req, res) => {
     try {
@@ -273,7 +334,7 @@ app.get("/students", authenticateToken, async (req, res) => {
     }
 });
 
-// ---------------- REST API: GET STUDENT BY ID ----------------
+// ================= GET STUDENT BY ID =================
 
 app.get("/students/:id", authenticateToken, async (req, res) => {
     try {
@@ -304,159 +365,166 @@ app.get("/students/:id", authenticateToken, async (req, res) => {
     }
 });
 
-// ---------------- REST API: ADD STUDENT ----------------
+// ================= ADD STUDENT =================
 
-app.post("/students", authenticateToken, async (req, res) => {
-    try {
-        const { name, course } = req.body;
+app.post(
+    "/students",
+    authenticateToken,
+    authorizeRole("admin"),
+    async (req, res) => {
+        try {
+            const { name, course } = req.body;
 
-        if (
-            !name ||
-            !course ||
-            typeof name !== "string" ||
-            typeof course !== "string"
-        ) {
-            return res.status(400).json({
-                message: "Valid name and course are required"
-            });
-        }
-
-        const newStudent = {
-            name: name.trim(),
-            course: course.trim()
-        };
-
-        if (!newStudent.name || !newStudent.course) {
-            return res.status(400).json({
-                message: "Name and course cannot be empty"
-            });
-        }
-
-        const result = await students.insertOne(newStudent);
-
-        io.emit("students:changed");
-
-        res.status(201).json({
-            message: "Student added successfully!",
-            student: {
-                _id: result.insertedId,
-                ...newStudent
-            }
-        });
-
-    } catch (error) {
-        console.error("Add student error:", error);
-
-        res.status(500).json({
-            message: "Unable to add student"
-        });
-    }
-});
-
-// ---------------- REST API: UPDATE STUDENT ----------------
-
-app.put("/students/:id", authenticateToken, async (req, res) => {
-    try {
-        if (!ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({
-                message: "Invalid student ID"
-            });
-        }
-
-        const { name, course } = req.body;
-
-        if (!name && !course) {
-            return res.status(400).json({
-                message: "Provide name or course to update"
-            });
-        }
-
-        const updates = {};
-
-        if (name !== undefined) {
-            if (typeof name !== "string" || !name.trim()) {
+            if (
+                typeof name !== "string" ||
+                typeof course !== "string" ||
+                !name.trim() ||
+                !course.trim()
+            ) {
                 return res.status(400).json({
-                    message: "Invalid student name"
+                    message: "Valid name and course are required"
                 });
             }
 
-            updates.name = name.trim();
-        }
+            const newStudent = {
+                name: name.trim(),
+                course: course.trim()
+            };
 
-        if (course !== undefined) {
-            if (typeof course !== "string" || !course.trim()) {
+            const result = await students.insertOne(newStudent);
+
+            io.emit("students:changed");
+
+            res.status(201).json({
+                message: "Student added successfully!",
+                student: {
+                    _id: result.insertedId,
+                    ...newStudent
+                }
+            });
+
+        } catch (error) {
+            console.error("Add student error:", error);
+
+            res.status(500).json({
+                message: "Unable to add student"
+            });
+        }
+    }
+);
+
+// ================= UPDATE STUDENT =================
+
+app.put(
+    "/students/:id",
+    authenticateToken,
+    authorizeRole("admin"),
+    async (req, res) => {
+        try {
+            if (!ObjectId.isValid(req.params.id)) {
                 return res.status(400).json({
-                    message: "Invalid course"
+                    message: "Invalid student ID"
                 });
             }
 
-            updates.course = course.trim();
-        }
+            const { name, course } = req.body;
+            const updates = {};
 
-        const result = await students.updateOne(
-            { _id: new ObjectId(req.params.id) },
-            { $set: updates }
-        );
+            if (name !== undefined) {
+                if (typeof name !== "string" || !name.trim()) {
+                    return res.status(400).json({
+                        message: "Invalid student name"
+                    });
+                }
 
-        if (result.matchedCount === 0) {
-            return res.status(404).json({
-                message: "Student not found"
+                updates.name = name.trim();
+            }
+
+            if (course !== undefined) {
+                if (typeof course !== "string" || !course.trim()) {
+                    return res.status(400).json({
+                        message: "Invalid course"
+                    });
+                }
+
+                updates.course = course.trim();
+            }
+
+            if (Object.keys(updates).length === 0) {
+                return res.status(400).json({
+                    message: "Provide name or course to update"
+                });
+            }
+
+            const result = await students.updateOne(
+                { _id: new ObjectId(req.params.id) },
+                { $set: updates }
+            );
+
+            if (result.matchedCount === 0) {
+                return res.status(404).json({
+                    message: "Student not found"
+                });
+            }
+
+            io.emit("students:changed");
+
+            res.json({
+                message: "Student updated successfully!"
+            });
+
+        } catch (error) {
+            console.error("Update student error:", error);
+
+            res.status(500).json({
+                message: "Unable to update student"
             });
         }
-
-        io.emit("students:changed");
-
-        res.json({
-            message: "Student updated successfully!"
-        });
-
-    } catch (error) {
-        console.error("Update student error:", error);
-
-        res.status(500).json({
-            message: "Unable to update student"
-        });
     }
-});
+);
 
-// ---------------- REST API: DELETE STUDENT ----------------
+// ================= DELETE STUDENT =================
 
-app.delete("/students/:id", authenticateToken, async (req, res) => {
-    try {
-        if (!ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({
-                message: "Invalid student ID"
+app.delete(
+    "/students/:id",
+    authenticateToken,
+    authorizeRole("admin"),
+    async (req, res) => {
+        try {
+            if (!ObjectId.isValid(req.params.id)) {
+                return res.status(400).json({
+                    message: "Invalid student ID"
+                });
+            }
+
+            const result = await students.deleteOne({
+                _id: new ObjectId(req.params.id)
+            });
+
+            if (result.deletedCount === 0) {
+                return res.status(404).json({
+                    message: "Student not found"
+                });
+            }
+
+            io.emit("students:changed");
+
+            res.json({
+                message: "Student deleted successfully!"
+            });
+
+        } catch (error) {
+            console.error("Delete student error:", error);
+
+            res.status(500).json({
+                message: "Unable to delete student"
             });
         }
-
-        const result = await students.deleteOne({
-            _id: new ObjectId(req.params.id)
-        });
-
-        if (result.deletedCount === 0) {
-            return res.status(404).json({
-                message: "Student not found"
-            });
-        }
-
-        io.emit("students:changed");
-
-        res.json({
-            message: "Student deleted successfully!"
-        });
-
-    } catch (error) {
-        console.error("Delete student error:", error);
-
-        res.status(500).json({
-            message: "Unable to delete student"
-        });
     }
-});
+);
 
-// ================= GRAPHQL API =================
+// ================= GRAPHQL STUDENT TYPE =================
 
-// Student Type
 const StudentType = new GraphQLObjectType({
     name: "Student",
 
@@ -476,7 +544,8 @@ const StudentType = new GraphQLObjectType({
     }
 });
 
-// GraphQL Queries
+// ================= GRAPHQL QUERIES =================
+
 const RootQuery = new GraphQLObjectType({
     name: "RootQueryType",
 
@@ -517,7 +586,8 @@ const RootQuery = new GraphQLObjectType({
     }
 });
 
-// GraphQL Mutations
+// ================= GRAPHQL MUTATIONS =================
+
 const RootMutation = new GraphQLObjectType({
     name: "RootMutationType",
 
@@ -535,7 +605,11 @@ const RootMutation = new GraphQLObjectType({
                 }
             },
 
-            resolve: async (_, args) => {
+            resolve: async (_, args, context) => {
+                if (!context.user || context.user.role !== "admin") {
+                    throw new Error("Admin access required");
+                }
+
                 const name = args.name.trim();
                 const course = args.course.trim();
 
@@ -543,10 +617,7 @@ const RootMutation = new GraphQLObjectType({
                     throw new Error("Name and course cannot be empty");
                 }
 
-                const newStudent = {
-                    name,
-                    course
-                };
+                const newStudent = { name, course };
 
                 const result = await students.insertOne(newStudent);
 
@@ -576,7 +647,11 @@ const RootMutation = new GraphQLObjectType({
                 }
             },
 
-            resolve: async (_, args) => {
+            resolve: async (_, args, context) => {
+                if (!context.user || context.user.role !== "admin") {
+                    throw new Error("Admin access required");
+                }
+
                 if (!ObjectId.isValid(args.id)) {
                     throw new Error("Invalid student ID");
                 }
@@ -629,7 +704,11 @@ const RootMutation = new GraphQLObjectType({
                 }
             },
 
-            resolve: async (_, args) => {
+            resolve: async (_, args, context) => {
+                if (!context.user || context.user.role !== "admin") {
+                    throw new Error("Admin access required");
+                }
+
                 if (!ObjectId.isValid(args.id)) {
                     throw new Error("Invalid student ID");
                 }
@@ -650,25 +729,28 @@ const RootMutation = new GraphQLObjectType({
     }
 });
 
-// Create GraphQL Schema
+// ================= GRAPHQL SCHEMA =================
+
 const schema = new GraphQLSchema({
     query: RootQuery,
     mutation: RootMutation
 });
 
-// Protected GraphQL Endpoint
+// ================= PROTECTED GRAPHQL =================
+
 app.use(
     "/graphql",
     authenticateToken,
-    graphqlHTTP({
+    graphqlHTTP((req) => ({
         schema,
-        graphiql: true
-    })
+        graphiql: true,
+        context: {
+            user: req.user
+        }
+    }))
 );
 
-// ================= END GRAPHQL API =================
-
-// ---------------- START SERVER ----------------
+// ================= START SERVER =================
 
 async function startServer() {
     try {
@@ -688,6 +770,7 @@ async function startServer() {
 
         server.listen(3000, () => {
             console.log("Server running on port 3000");
+            console.log("MongoDB connected successfully!");
             console.log("Socket.io is ready!");
             console.log("GraphQL endpoint: http://localhost:3000/graphql");
         });
